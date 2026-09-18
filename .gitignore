@@ -1,0 +1,10 @@
+.DS_Store
+.env
+.memcode-oauth.enc
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
