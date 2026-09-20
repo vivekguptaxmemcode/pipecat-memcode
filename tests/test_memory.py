@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-from memcode_sdk import HybridSearchResult, SourceRecord
+from memcode_sdk import HybridSearchResult, PersonalV2IngestResult, SourceRecord
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -16,9 +17,11 @@ from pipecat.frames.frames import (
     LLMContextFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
+from pipecat.pipeline.worker import PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.tests.utils import SleepFrame, run_test
+from pipecat.workers.runner import WorkerRunner
 
 import pipecat_memcode.memory as memory_module
 from pipecat_memcode import MemcodeMemoryConfig, MemcodeMemoryService
@@ -75,12 +78,26 @@ class _FakeClient:
     search_delay: float = 0.0
     ingest_delay: float = 0.0
     close_delay: float = 0.0
+    search_error: Exception | None = None
+    ingest_error: Exception | None = None
+    ingest_result: Any = field(
+        default_factory=lambda: {
+            "job_id": "job-1",
+            "status": "queued",
+            "created": True,
+            "queued_for_batch": True,
+            "estimated_available_in_seconds": 60.0,
+            "request_id": "request-1",
+            "elapsed_ms": 12.5,
+        }
+    )
 
     def __post_init__(self):
         self.search_calls: list[dict[str, Any]] = []
         self.ingest_calls: list[dict[str, Any]] = []
         self.close_calls = 0
         self.ingest_cancelled = False
+        self.ingest_completed = False
         self.ingest_started = asyncio.Event()
         self.search_in_flight = False
         self.close_while_searching = False
@@ -91,6 +108,8 @@ class _FakeClient:
         try:
             if self.search_delay:
                 await asyncio.sleep(self.search_delay)
+            if self.search_error is not None:
+                raise self.search_error
             return self.search_result
         finally:
             self.search_in_flight = False
@@ -101,10 +120,13 @@ class _FakeClient:
         try:
             if self.ingest_delay:
                 await asyncio.sleep(self.ingest_delay)
+            if self.ingest_error is not None:
+                raise self.ingest_error
         except asyncio.CancelledError:
             self.ingest_cancelled = True
             raise
-        return {"job_id": "job-1", "status": "pending"}
+        self.ingest_completed = True
+        return self.ingest_result
 
     async def close(self):
         self.close_calls += 1
@@ -184,6 +206,55 @@ async def test_recall_uses_search_v2_once_and_replaces_its_injected_block():
     assert messages.index(injected[0]) < next(
         index for index, message in enumerate(messages) if message.get("role") == "user"
     )
+
+
+@pytest.mark.asyncio
+async def test_recall_labels_conflicting_domains_and_logs_only_safe_metadata(caplog):
+    result = HybridSearchResult(
+        results=[
+            SourceRecord(domain="summary", content="User's name is Avery", score=0.8),
+            SourceRecord(domain="profile", content="basic_info / name = Vivek", score=1.0),
+        ],
+        request_id="recall-request-1",
+        elapsed_ms=2100.5,
+        failed_domains=["temporal"],
+        partial=True,
+    )
+    client = _FakeClient(search_result=result)
+    service = _service(client)
+    recall = _wire(service.recall_processor())
+    context = LLMContext([{"role": "user", "content": "PRIVATE QUERY SENTINEL"}])
+    caplog.set_level(logging.INFO, logger=memory_module.__name__)
+
+    await recall.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
+
+    injected = str(context.get_messages()[0]["content"])
+    assert "[summary] User's name is Avery" in injected
+    assert "[profile] basic_info / name = Vivek" in injected
+    assert "[profile] for current identity/preferences" in injected
+    assert injected.index("- [profile]") < injected.index("- [summary]")
+    assert "request_id=recall-request-1" in caplog.text
+    assert "hits=2" in caplog.text
+    assert "partial=True" in caplog.text
+    assert "failed_domains=('temporal',)" in caplog.text
+    assert "PRIVATE QUERY SENTINEL" not in caplog.text
+    assert "User's name is Avery" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_recall_exception_log_does_not_echo_query_or_exception_text(caplog):
+    client = _FakeClient(search_error=RuntimeError("PRIVATE SEARCH EXCEPTION"))
+    service = _service(client)
+    recall = _wire(service.recall_processor())
+    context = LLMContext([{"role": "user", "content": "PRIVATE SEARCH QUERY"}])
+    caplog.set_level(logging.WARNING, logger=memory_module.__name__)
+
+    await recall.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
+
+    assert context.get_messages() == [{"role": "user", "content": "PRIVATE SEARCH QUERY"}]
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "PRIVATE SEARCH EXCEPTION" not in caplog.text
+    assert "PRIVATE SEARCH QUERY" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -301,6 +372,65 @@ async def test_capture_only_persists_finalized_delta_and_never_injected_memory()
 
 
 @pytest.mark.asyncio
+async def test_ingest_receipt_logging_is_allowlisted_and_content_free(caplog):
+    client = _FakeClient(
+        ingest_result=PersonalV2IngestResult(
+            job_id="job-safe-1",
+            status="queued",
+            created=True,
+            queued_for_batch=True,
+            estimated_available_in_seconds=60.0,
+            request_id="request-safe-1",
+            elapsed_ms=14.0,
+            status_url="/private/status/path",
+        )
+    )
+    service = _service(client)
+    recall = _wire(service.recall_processor())
+    capture = _wire(service.capture_processor())
+    caplog.set_level(logging.INFO, logger=memory_module.__name__)
+
+    await recall.process_frame(
+        LLMContextFrame(context=LLMContext([{"role": "user", "content": "PRIVATE USER SENTINEL"}])),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(
+        LLMContextAssistantTurnFrame(text="PRIVATE ASSISTANT SENTINEL", timestamp="now"),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(EndFrame(), FrameDirection.DOWNSTREAM)
+
+    assert "job_id=job-safe-1" in caplog.text
+    assert "estimated_available_in_seconds=60.0" in caplog.text
+    assert "request_id=request-safe-1" in caplog.text
+    assert "PRIVATE USER SENTINEL" not in caplog.text
+    assert "PRIVATE ASSISTANT SENTINEL" not in caplog.text
+    assert "/private/status/path" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ingest_exception_log_does_not_echo_sensitive_exception_text(caplog):
+    client = _FakeClient(ingest_error=RuntimeError("PRIVATE EXCEPTION SENTINEL"))
+    service = _service(client)
+    recall = _wire(service.recall_processor())
+    capture = _wire(service.capture_processor())
+    caplog.set_level(logging.WARNING, logger=memory_module.__name__)
+
+    await recall.process_frame(
+        LLMContextFrame(context=LLMContext([{"role": "user", "content": "save safely"}])),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(
+        LLMContextAssistantTurnFrame(text="safe answer", timestamp="now"),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(EndFrame(), FrameDirection.DOWNSTREAM)
+
+    assert "exception_type=RuntimeError" in caplog.text
+    assert "PRIVATE EXCEPTION SENTINEL" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_tool_preamble_and_final_answer_are_one_terminal_ingest():
     client = _FakeClient()
     service = _service(client)
@@ -368,6 +498,36 @@ async def test_real_pipeline_orders_recall_before_one_tool_round_trip_capture():
     assert client.ingest_calls[0]["agent_response"] == (
         "Let me check Memcode.\n\nYour launch is Friday."
     )
+
+
+@pytest.mark.asyncio
+async def test_worker_runner_stop_when_done_durably_captures_final_turn():
+    client = _FakeClient()
+    service = _service(client)
+    pipeline = Pipeline([service.recall_processor(), service.capture_processor()])
+    worker = PipelineWorker(pipeline, enable_rtvi=False, idle_timeout_secs=None)
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(worker)
+
+    @runner.event_handler("on_ready")
+    async def on_ready(ready_runner):
+        await worker.queue_frames(
+            [
+                LLMContextFrame(
+                    context=LLMContext([{"role": "user", "content": "Remember final turn"}])
+                ),
+                LLMContextAssistantTurnFrame(
+                    text="I will remember the final turn.", timestamp="now"
+                ),
+            ]
+        )
+        await ready_runner.stop_when_done()
+
+    await asyncio.wait_for(runner.run(), timeout=2.0)
+
+    assert len(client.ingest_calls) == 1
+    assert client.ingest_calls[0]["user_query"] == "Remember final turn"
+    assert client.ingest_calls[0]["agent_response"] == "I will remember the final turn."
 
 
 @pytest.mark.asyncio
@@ -629,6 +789,35 @@ async def test_interruption_discards_partial_turn_but_later_complete_turn_ingest
 
 
 @pytest.mark.asyncio
+async def test_interrupted_context_can_retry_recall_and_capture_complete_answer():
+    client = _FakeClient()
+    service = _service(client)
+    recall = _wire(service.recall_processor())
+    capture = _wire(service.capture_processor())
+    context = LLMContext([{"role": "user", "content": "retry this exact turn"}])
+
+    await recall.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
+    await capture.process_frame(
+        LLMContextAssistantTurnFrame(text="interrupted answer", timestamp="now"),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+
+    await recall.process_frame(LLMContextFrame(context=context), FrameDirection.DOWNSTREAM)
+    assert len(client.search_calls) == 2
+    assert len(service._state.pending_turns) == 1
+    await capture.process_frame(
+        LLMContextAssistantTurnFrame(text="completed retry", timestamp="now"),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(EndFrame(), FrameDirection.DOWNSTREAM)
+
+    assert len(client.ingest_calls) == 1
+    assert client.ingest_calls[0]["user_query"] == "retry this exact turn"
+    assert client.ingest_calls[0]["agent_response"] == "completed retry"
+
+
+@pytest.mark.asyncio
 async def test_delayed_assistant_timestamp_never_cross_pairs_with_next_user():
     client = _FakeClient()
     service = _service(client)
@@ -706,6 +895,33 @@ async def test_cleanup_without_terminal_frame_flushes_staged_turn_once():
 
     assert len(client.ingest_calls) == 1
     assert client.ingest_calls[0]["agent_response"] == "flushed answer"
+
+
+@pytest.mark.asyncio
+async def test_end_frame_waits_for_ingest_within_shutdown_budget():
+    client = _FakeClient(ingest_delay=0.02)
+    service = _service(
+        client,
+        ingest_timeout_seconds=0.05,
+        shutdown_timeout_seconds=0.08,
+    )
+    recall = _wire(service.recall_processor())
+    capture = _wire(service.capture_processor())
+
+    await recall.process_frame(
+        LLMContextFrame(context=LLMContext([{"role": "user", "content": "slow receipt"}])),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(
+        LLMContextAssistantTurnFrame(text="saved after a short wait", timestamp="now"),
+        FrameDirection.DOWNSTREAM,
+    )
+    await capture.process_frame(EndFrame(), FrameDirection.DOWNSTREAM)
+
+    assert len(client.ingest_calls) == 1
+    assert client.ingest_completed
+    assert not service._state.ingest_tasks
+    assert not client.ingest_cancelled
 
 
 @pytest.mark.asyncio
@@ -835,16 +1051,51 @@ async def test_unexpected_tracked_task_exception_is_observed(caplog):
 
     assert not service._state.ingest_tasks
     assert "Unexpected Memcode ingest task failure" in caplog.text
+    assert "unexpected-test-error" not in caplog.text
+
+
+def test_default_timeouts_cover_observed_latency_and_final_receipt_shutdown():
+    config = MemcodeMemoryConfig()
+
+    assert config.search_timeout_seconds >= 5.0
+    assert config.ingest_timeout_seconds >= 10.0
+    assert config.shutdown_timeout_seconds > config.ingest_timeout_seconds
+
+
+def test_minimum_context_budget_can_still_inject_one_memory():
+    config = MemcodeMemoryConfig(max_context_characters=256)
+    result = HybridSearchResult(
+        results=[SourceRecord(domain="profile", content="Name is Vivek", score=1.0)]
+    )
+
+    formatted = memory_module._format_memory_context(result, config)
+
+    assert formatted is not None
+    assert len(formatted) <= 256
+    assert "[profile]" in formatted
 
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"search_top_k": 0}, "search_top_k"),
+        ({"search_top_k": 1.5}, "search_top_k"),
+        ({"search_top_k": True}, "search_top_k"),
         ({"search_minimum_score": 2}, "search_minimum_score"),
+        ({"search_minimum_score": float("nan")}, "search_minimum_score"),
+        ({"search_minimum_score": float("inf")}, "search_minimum_score"),
         ({"search_timeout_seconds": 0}, "search_timeout_seconds"),
+        ({"search_timeout_seconds": True}, "search_timeout_seconds"),
+        ({"search_timeout_seconds": float("nan")}, "search_timeout_seconds"),
+        ({"ingest_timeout_seconds": "10"}, "ingest_timeout_seconds"),
+        ({"shutdown_timeout_seconds": float("inf")}, "shutdown_timeout_seconds"),
         ({"max_context_characters": 100}, "max_context_characters"),
+        ({"max_context_characters": 4000.5}, "max_context_characters"),
+        ({"search_mode": "invalid"}, "search_mode"),
+        ({"context_role": "user"}, "context_role"),
+        ({"effort_level": "maximum"}, "effort_level"),
         ({"context_header": "  "}, "context_header"),
+        ({"context_header": None}, "context_header"),
     ],
 )
 def test_config_validation(kwargs, message):

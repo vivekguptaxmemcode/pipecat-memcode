@@ -42,9 +42,9 @@ uv add "pipecat-memcode[example]"
 ```
 
 The first release targets Python 3.11-3.14, `pipecat-ai>=1.10,<1.11`, and
-`memcode-sdk` 2.4.x. Pipecat releases outside the 1.10 line are not yet claimed
+`memcode-sdk>=2.4,<3`. Pipecat releases outside the 1.10 line are not yet claimed
 compatible. Source, issues, and release history live in the
-[`pipecat-memcode` repository](https://github.com/vivekguptaxmemcode/pipecat-memcode).
+[`pipecat-memcode` repository](https://github.com/vivekgupta-memcode/pipecat-memcode).
 
 ## OAuth 2.1 connection
 
@@ -126,6 +126,16 @@ unreachable loopback page; the address bar still contains the callback URL.
 The example validates OAuth state and writes access and rotating refresh tokens
 only to the encrypted, gitignored token file.
 
+To disconnect the locally stored account before authorizing a different one:
+
+```bash
+uv run python examples/foundational/memcode_memory.py --disconnect
+uv run python examples/foundational/memcode_memory.py --connect
+```
+
+`--disconnect` removes this example's local token record; it does not delete
+the Memcode account or its memories.
+
 After connection, run the bot:
 
 ```bash
@@ -156,7 +166,7 @@ memory = MemcodeMemoryService(
     session_id=call_id,  # use a stable room/call ID for retry idempotency
     config=MemcodeMemoryConfig(
         search_top_k=5,
-        search_timeout_seconds=1.5,
+        search_timeout_seconds=5.0,
     ),
 )
 
@@ -177,6 +187,25 @@ pipeline = Pipeline(
     ]
 )
 ```
+
+### Graceful disconnects are required for final-turn capture
+
+End a normal Pipecat 1.10 session with `stop_when_done()` so `EndFrame` drains
+through the pipeline and the final completed user/assistant turn obtains a
+durable Memcode receipt:
+
+```python
+@transport.event_handler("on_client_disconnected")
+async def on_client_disconnected(transport, client):
+    await runner.stop_when_done()
+```
+
+Do not map a normal client disconnect to `runner.cancel()`: cancellation is an
+urgent path that intentionally discards the active turn. Do not substitute
+`runner.end()` on Pipecat 1.10 either; runner cleanup can cancel the worker
+before its queued `EndFrame` finishes. A participant should also let the
+assistant finish before disconnecting because no shutdown path can recover an
+upstream turn that was never finalized.
 
 Applications that already own a per-user SDK client can inject it instead:
 
@@ -209,7 +238,11 @@ for the complete runnable integration.
 Recall uses `AsyncMemcodeClient.search_v2`, not `retrieve_v2`. It always asks
 for extracted memories only (`mode="memories"`,
 `include_original_chunks=False`), bounds the resulting block, marks it as
-reference-only data, and fails open if Memcode is slow or unavailable.
+reference-only data, and fails open if Memcode is slow or unavailable. Each
+record retains a safe domain label. The default context guidance prefers
+current profile records for identity and preferences over conflicting summary
+records, places profile records first when the context budget is tight, and
+tells the model to acknowledge other conflicts instead of guessing.
 
 Capture uses `AsyncMemcodeClient.ingest_v2` in a Pipecat-managed background
 task. Assistant-turn frames are staged because Pipecat can emit one at both a
@@ -224,20 +257,25 @@ idempotency key derived from the stable session ID and combined finalized turn.
 Graceful shutdown work is bounded by `shutdown_timeout_seconds`; cleanup and
 client closing are cancellation-safe and idempotent.
 
-The ingestion call returns a durable receipt. Memory extraction continues in
-Memcode asynchronously; this package intentionally does not hold up the voice
-pipeline by polling that job.
+The ingestion call returns a durable receipt, and the integration logs only its
+safe operational fields (job/status/creation state/indexing estimate/request
+ID). It never logs conversation text or OAuth credentials. Memory extraction
+continues in Memcode asynchronously; this package intentionally does not hold
+up the voice pipeline by polling that job. Respect the receipt's
+`estimated_available_in_seconds` value before testing recall in a new session;
+the estimate can be around 60 seconds, so immediate cross-session recall is not
+guaranteed.
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---:|---|
-| `search_top_k` | `5` | Maximum memories requested per user turn |
+| `search_top_k` | `5` | Maximum memories requested per memory domain |
 | `search_minimum_score` | `0.0` | Minimum relevance score |
 | `search_mode` | `"default"` | Memcode routing mode (`default` or `global`) |
-| `search_timeout_seconds` | `1.5` | Recall latency budget before fail-open |
-| `ingest_timeout_seconds` | `5.0` | Budget for a durable ingest receipt |
-| `shutdown_timeout_seconds` | `2.0` | Graceful EndFrame and cleanup budget |
+| `search_timeout_seconds` | `5.0` | Recall latency budget before fail-open |
+| `ingest_timeout_seconds` | `10.0` | Budget for a durable ingest receipt |
+| `shutdown_timeout_seconds` | `12.0` | Graceful EndFrame and cleanup budget |
 | `max_context_characters` | `4000` | Maximum complete injected context block |
 | `context_role` | `"developer"` | Injected universal-context role |
 | `context_header` | reference-only warning | Boundary between data and instructions |
@@ -254,7 +292,12 @@ cannot deduplicate the same turn after a process restart.
   erase valid hits.
 - Ingest timeout or error: the voice response is never blocked or failed.
 - Interruption or cancellation: partial active turns are discarded; urgent
-  cancellation never waits for Memcode.
+  cancellation never waits for Memcode and can abandon unreceipted background
+  writes. Reserve it for genuinely urgent shutdown.
+- Normal disconnect: use `runner.stop_when_done()` so the final completed turn
+  is captured before cleanup.
+- Accepted ingest: extraction is asynchronous; use the receipt's availability
+  estimate rather than assuming immediate recall.
 - Duplicate context frames: recall is cached per finalized conversational
   prefix and only one pending capture turn is created.
 - Duplicate write attempt: the same finalized turn receives the same

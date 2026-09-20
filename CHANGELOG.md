@@ -16,3 +16,22 @@ All notable changes to `pipecat-memcode` will be documented here.
 - Cleanup fallback writes and owned-client closure share a bounded, cancellation-safe lifecycle.
 - Runnable WebRTC voice example with separate OAuth registration and account-connection modes.
 - Encrypted local token persistence for the foundational example.
+
+### Changed
+
+- Increased the default recall, ingest-receipt, and graceful-shutdown budgets to
+  tolerate observed production API latency without silently dropping memory.
+- Added content-free recall and ingest receipt telemetry, including indexing
+  availability estimates.
+- Added an explicit local OAuth disconnect command for safely switching the
+  account used by the foundational example.
+- Labeled recalled memory domains and added conflict guidance for stale summary
+  records versus current profile data.
+- Hardened runtime configuration validation and corrected repository metadata.
+
+### Fixed
+
+- Gracefully drain normal WebRTC disconnects with `stop_when_done()` so the
+  final completed turn is captured instead of cancelled.
+- Allow interrupted contexts to be retried and captured instead of remaining
+  blocked by the recall cache.

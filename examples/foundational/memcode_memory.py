@@ -4,6 +4,7 @@ Account setup is deliberately separate from the real-time voice path:
 
     uv run python examples/foundational/memcode_memory.py --register
     uv run python examples/foundational/memcode_memory.py --connect
+    uv run python examples/foundational/memcode_memory.py --disconnect
     uv run python examples/foundational/memcode_memory.py -t webrtc
 
 The local example stores rotating OAuth tokens in one encrypted file. Production
@@ -206,6 +207,14 @@ async def connect_account() -> None:
         await oauth.close()
 
 
+async def disconnect_account() -> None:
+    """Remove this example's locally stored OAuth grant."""
+
+    token_key = os.getenv("MEMCODE_TOKEN_KEY", "pipecat-local-demo")
+    await _token_store().delete_tokens(token_key)
+    print("Memcode account disconnected locally. Run --connect to authorize an account again.")
+
+
 async def run_bot(transport: SmallWebRTCTransport, runner_args: RunnerArguments) -> None:
     """Run one OAuth-authenticated voice-agent session."""
 
@@ -243,7 +252,10 @@ async def run_bot(transport: SmallWebRTCTransport, runner_args: RunnerArguments)
             session_id=runner_args.session_id,
             config=MemcodeMemoryConfig(
                 search_top_k=5,
-                search_timeout_seconds=1.5,
+                # The demo allows extra headroom for cold or cross-region recall.
+                search_timeout_seconds=8.0,
+                ingest_timeout_seconds=10.0,
+                shutdown_timeout_seconds=12.0,
                 max_context_characters=4000,
             ),
         )
@@ -281,7 +293,11 @@ async def run_bot(transport: SmallWebRTCTransport, runner_args: RunnerArguments)
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(transport: SmallWebRTCTransport, client: Any) -> None:
             logger.info("Client disconnected")
-            await runner.cancel()
+            # A normal disconnect must drain EndFrame through the pipeline so
+            # the final completed turn receives a durable Memcode receipt.
+            # runner.cancel() is intentionally urgent and discards that turn;
+            # runner.end() can race with runner cleanup in Pipecat 1.10.
+            await runner.stop_when_done()
 
         await runner.run()
     finally:
@@ -305,6 +321,8 @@ if __name__ == "__main__":
         asyncio.run(register_client())
     elif len(sys.argv) == 2 and sys.argv[1] == "--connect":
         asyncio.run(connect_account())
+    elif len(sys.argv) == 2 and sys.argv[1] == "--disconnect":
+        asyncio.run(disconnect_account())
     else:
         from pipecat.runner.run import main
 
