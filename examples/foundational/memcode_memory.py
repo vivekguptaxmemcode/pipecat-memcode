@@ -171,6 +171,8 @@ async def register_client() -> None:
             client_name="Pipecat Memcode local example",
             redirect_uris=(redirect_uri,),
             application_type="native",
+            software_id="ai.pipecat.memcode",
+            software_version="0.1.1",
         )
     finally:
         await oauth.close()
