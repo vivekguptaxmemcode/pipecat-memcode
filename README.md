@@ -68,9 +68,12 @@ work. A `MemcodeMemoryService` instance is per authenticated participant. The
 OAuth token subject selects the personal memory scope, so this integration
 never accepts or transmits a `user_id`.
 
-`AsyncMemcodeOAuthClient` from `memcode-sdk>=2.4.0` implements discovery,
+`AsyncMemcodeOAuthClient` from `memcode-sdk>=2.5.0` implements discovery,
 dynamic registration, PKCE, token exchange, rotation, and the access-token
-provider interface consumed here.
+provider interface consumed here. The included registration command sends the
+stable public software identifier `ai.pipecat.memcode`; Memcode binds that
+identifier to the Pipecat integration in its server-owned registry. It is not a
+credential and never upgrades attribution to verified on its own.
 
 Never put a refresh token, authorization code, or PKCE verifier in frontend
 storage, logs, frame metadata, or LLM context.
