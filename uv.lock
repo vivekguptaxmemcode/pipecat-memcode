@@ -1423,14 +1423,14 @@ wheels = [
 
 [[package]]
 name = "memcode-sdk"
-version = "2.4.0"
+version = "2.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/89/e4/e308428efc82137479ac166cc0818532975ee73ff998bbdfdae909c29dfa/memcode_sdk-2.4.0.tar.gz", hash = "sha256:971b92b6ea6b405f54083969b1bb1b4af3b485edcad227278b3f8350502c6dbf", size = 45065, upload-time = "2026-09-17T19:36:51.973Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/10/5fabd4d82ea238bf26112cc143b2136610fbff920491c0ec7cceff0bd43b/memcode_sdk-2.5.0.tar.gz", hash = "sha256:490736edb813b77c4aaaa1b1040f223b85003ff3704f29c078e260eeb33384ad", size = 49263, upload-time = "2026-09-21T07:06:30.938Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/04/a6/a2be5e3dc694cf9c3377a2c109907cd92a2b6b4d7bb02cc1c3c18158a059/memcode_sdk-2.4.0-py3-none-any.whl", hash = "sha256:560bb6c0efcd7269136870c15aa5e293b6cd45ff4ab18fb6ed4d0592dd341fef", size = 37269, upload-time = "2026-09-17T19:36:50.995Z" },
+    { url = "https://files.pythonhosted.org/packages/48/d7/1080b4eeb5722a7d316301ffef105644dcaed5d103922e918c01ef8b7a7f/memcode_sdk-2.5.0-py3-none-any.whl", hash = "sha256:0b874a9e8fde145c538b99f3225dd0b53e07354b3774fc944f64f4847387b6aa", size = 39306, upload-time = "2026-09-21T07:06:29.731Z" },
 ]
 
 [[package]]
@@ -2056,7 +2056,7 @@ wheels = [
 
 [[package]]
 name = "pipecat-memcode"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "memcode-sdk" },
@@ -2080,7 +2080,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", marker = "extra == 'example'", specifier = ">=45,<47" },
-    { name = "memcode-sdk", specifier = ">=2.4.0,<3" },
+    { name = "memcode-sdk", specifier = ">=2.5.0,<3" },
     { name = "pipecat-ai", specifier = ">=1.10,<1.11" },
     { name = "pipecat-ai", extras = ["deepgram", "runner", "webrtc"], marker = "extra == 'example'", specifier = ">=1.10,<1.11" },
 ]
