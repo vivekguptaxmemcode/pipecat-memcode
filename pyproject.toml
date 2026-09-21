@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pipecat-memcode"
-version = "0.1.0"
+version = "0.1.1"
 description = "Memcode long-term memory processors for Pipecat"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,7 +21,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "memcode-sdk>=2.4.0,<3",
+  "memcode-sdk>=2.5.0,<3",
   "pipecat-ai>=1.10,<1.11",
 ]
 
