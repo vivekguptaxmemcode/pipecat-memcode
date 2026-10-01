@@ -22,7 +22,7 @@ classifiers = [
 ]
 dependencies = [
   "memcode-sdk>=2.4.0,<3",
-  "pipecat-ai>=1.10,<1.11",
+  "pipecat-ai>=1.10,<2",
 ]
 
 [project.urls]
